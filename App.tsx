@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Pressable,
   StyleSheet,
   Text,
   View,
@@ -32,6 +33,8 @@ export default function App() {
 
   const [worldStatus, setWorldStatus] =
     useState('LOCATING...');
+
+    const [ selectedNode, setSelectedNode ] = useState<ParadigmNode | null>(null);
 
   useEffect(() => {
     async function startWorld() {
@@ -172,6 +175,7 @@ export default function App() {
           <Marker
             key={node.id}
             coordinate={node.coordinate}
+            onPress={() => setSelectedNode(node)}
             title={node.name}
             description={`${node.state} · +${node.xp} XP`}
           >
@@ -223,15 +227,64 @@ export default function App() {
         </View>
       </View>
 
-      <View style={styles.bottomPanel}>
-        <Text style={styles.worldTitle}>
-          YOUR WORLD IS ACTIVE
+      {selectedNode ? (
+  <View style={styles.bottomPanel}>
+    <View style={styles.nodePanelHeader}>
+      <View>
+        <Text style={styles.nodePanelState}>
+          {selectedNode.state}
         </Text>
 
-        <Text style={styles.worldSubtitle}>
-          Move through the city. Participate. Build history.
+        <Text style={styles.nodePanelTitle}>
+          {selectedNode.emoji} {selectedNode.name}
         </Text>
       </View>
+
+      <Pressable
+        onPress={() => setSelectedNode(null)}
+        style={styles.closeButton}
+      >
+        <Text style={styles.closeButtonText}>×</Text>
+      </Pressable>
+    </View>
+
+    <Text style={styles.nodePanelXP}>
+      +{selectedNode.xp} XP opportunity
+    </Text>
+
+    <Text style={styles.nodePanelMeaning}>
+      {selectedNode.id === 'court' &&
+        'Activity is happening here. Participate to build court history.'}
+
+      {selectedNode.id === 'bodega' &&
+        'A familiar place in your world. Repeated visits strengthen your relationship here.'}
+
+      {selectedNode.id === 'transit' &&
+        'Movement is boosted in this zone right now.'}
+
+      {selectedNode.id === 'park' &&
+        'New territory. Explore this place to begin building history.'}
+    </Text>
+
+    <Pressable style={styles.participateButton}>
+      <Text style={styles.participateButtonText}>
+        {selectedNode.id === 'court'
+          ? 'BEGIN PARTICIPATION'
+          : 'VIEW OPPORTUNITY'}
+      </Text>
+    </Pressable>
+  </View>
+) : (
+  <View style={styles.bottomPanel}>
+    <Text style={styles.worldTitle}>
+      YOUR WORLD IS ACTIVE
+    </Text>
+
+    <Text style={styles.worldSubtitle}>
+      Move through the city. Participate. Build history.
+    </Text>
+  </View>
+)}
     </View>
   );
 }
@@ -374,4 +427,67 @@ const styles = StyleSheet.create({
     marginTop: 5,
     fontSize: 13,
   },
+  nodePanelHeader: {
+  flexDirection: 'row',
+  justifyContent: 'space-between',
+  alignItems: 'flex-start',
+},
+
+nodePanelState: {
+  color: '#7DFF89',
+  fontSize: 10,
+  fontWeight: '800',
+  letterSpacing: 1.4,
+  marginBottom: 5,
+},
+
+nodePanelTitle: {
+  color: '#ffffff',
+  fontSize: 21,
+  fontWeight: '800',
+},
+
+nodePanelXP: {
+  color: '#ffffff',
+  fontSize: 14,
+  fontWeight: '700',
+  marginTop: 16,
+},
+
+nodePanelMeaning: {
+  color: '#aaaaaf',
+  fontSize: 13,
+  lineHeight: 19,
+  marginTop: 7,
+},
+
+closeButton: {
+  width: 34,
+  height: 34,
+  borderRadius: 17,
+  backgroundColor: '#292930',
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+closeButtonText: {
+  color: '#ffffff',
+  fontSize: 24,
+  lineHeight: 26,
+},
+
+participateButton: {
+  backgroundColor: '#ffffff',
+  borderRadius: 14,
+  paddingVertical: 14,
+  alignItems: 'center',
+  marginTop: 18,
+},
+
+participateButtonText: {
+  color: '#101014',
+  fontSize: 12,
+  fontWeight: '900',
+  letterSpacing: 1,
+},
 });
