@@ -34,7 +34,13 @@ export default function App() {
   const [worldStatus, setWorldStatus] =
     useState('LOCATING...');
 
-    const [ selectedNode, setSelectedNode ] = useState<ParadigmNode | null>(null);
+  const [selectedNode, setSelectedNode] =
+    useState<ParadigmNode | null>(null);
+  const [activeSession, setActiveSession] = useState<{
+    nodeId: string;
+    startedAt: number;
+  } | null>(null);
+  const [xpToday, setXpToday] = useState(0);
 
   useEffect(() => {
     async function startWorld() {
@@ -218,7 +224,7 @@ export default function App() {
 
         <View style={styles.xpBox}>
           <Text style={styles.xpValue}>
-            0
+            {xpToday}
           </Text>
 
           <Text style={styles.xpLabel}>
@@ -228,63 +234,85 @@ export default function App() {
       </View>
 
       {selectedNode ? (
-  <View style={styles.bottomPanel}>
-    <View style={styles.nodePanelHeader}>
-      <View>
-        <Text style={styles.nodePanelState}>
-          {selectedNode.state}
-        </Text>
+        <View style={styles.bottomPanel}>
+          <View style={styles.nodePanelHeader}>
+            <View>
+              <Text style={styles.nodePanelState}>
+                {selectedNode.id === 'court' &&
+                activeSession?.nodeId === selectedNode.id
+                  ? 'PARTICIPATING'
+                  : selectedNode.state}
+              </Text>
 
-        <Text style={styles.nodePanelTitle}>
-          {selectedNode.emoji} {selectedNode.name}
-        </Text>
-      </View>
+              <Text style={styles.nodePanelTitle}>
+                {selectedNode.emoji} {selectedNode.name}
+              </Text>
+            </View>
 
-      <Pressable
-        onPress={() => setSelectedNode(null)}
-        style={styles.closeButton}
-      >
-        <Text style={styles.closeButtonText}>×</Text>
-      </Pressable>
-    </View>
+            <Pressable
+              onPress={() => setSelectedNode(null)}
+              style={styles.closeButton}
+            >
+              <Text style={styles.closeButtonText}>×</Text>
+            </Pressable>
+          </View>
 
-    <Text style={styles.nodePanelXP}>
-      +{selectedNode.xp} XP opportunity
-    </Text>
+          <Text style={styles.nodePanelXP}>
+            +{selectedNode.xp} XP opportunity
+          </Text>
 
-    <Text style={styles.nodePanelMeaning}>
-      {selectedNode.id === 'court' &&
-        'Activity is happening here. Participate to build court history.'}
+          <Text style={styles.nodePanelMeaning}>
+            {selectedNode.id === 'court' &&
+              'Activity is happening here. Participate to build court history.'}
 
-      {selectedNode.id === 'bodega' &&
-        'A familiar place in your world. Repeated visits strengthen your relationship here.'}
+            {selectedNode.id === 'bodega' &&
+              'A familiar place in your world. Repeated visits strengthen your relationship here.'}
 
-      {selectedNode.id === 'transit' &&
-        'Movement is boosted in this zone right now.'}
+            {selectedNode.id === 'transit' &&
+              'Movement is boosted in this zone right now.'}
 
-      {selectedNode.id === 'park' &&
-        'New territory. Explore this place to begin building history.'}
-    </Text>
+            {selectedNode.id === 'park' &&
+              'New territory. Explore this place to begin building history.'}
+          </Text>
 
-    <Pressable style={styles.participateButton}>
-      <Text style={styles.participateButtonText}>
-        {selectedNode.id === 'court'
-          ? 'BEGIN PARTICIPATION'
-          : 'VIEW OPPORTUNITY'}
-      </Text>
-    </Pressable>
-  </View>
-) : (
-  <View style={styles.bottomPanel}>
-    <Text style={styles.worldTitle}>
-      YOUR WORLD IS ACTIVE
-    </Text>
+          <Pressable
+            onPress={() => {
+              if (selectedNode.id !== 'court') return;
 
-    <Text style={styles.worldSubtitle}>
-      Move through the city. Participate. Build history.
-    </Text>
-  </View>
-)}
+              if (activeSession?.nodeId === selectedNode.id) {
+                setXpToday((currentXp) => currentXp + selectedNode.xp);
+                setActiveSession(null);
+                return;
+              }
+
+              setActiveSession({
+                nodeId: selectedNode.id,
+                startedAt: Date.now(),
+              });
+            }}
+            style={styles.participateButton}
+          >
+            <Text style={styles.participateButtonText}>
+              {selectedNode.id === 'court' &&
+              activeSession?.nodeId === selectedNode.id
+                ? 'COMPLETE PARTICIPATION'
+                : selectedNode.id === 'court'
+                  ? 'BEGIN PARTICIPATION'
+                  : 'VIEW OPPORTUNITY'}
+            </Text>
+          </Pressable>
+        </View>
+      ) : (
+        <View style={styles.bottomPanel}>
+          <Text style={styles.worldTitle}>
+            YOUR WORLD IS ACTIVE
+          </Text>
+
+          <Text style={styles.worldSubtitle}>
+            Move through the city. Participate. Build history.
+          </Text>
+        </View>
+      )}
     </View>
   );
 }
