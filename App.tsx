@@ -9,6 +9,7 @@ import {
 import MapView, { Marker, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { StatusBar } from 'expo-status-bar';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Coordinate = {
   latitude: number;
@@ -26,6 +27,44 @@ type ParadigmNode = {
   coordinate: Coordinate;
 };
 
+type CompletedSession = {
+  nodeId: string;
+  nodeName: string;
+  startedAt: number;
+  completedAt: number;
+  xpAwarded: number;
+};
+
+type ParadigmMemory = {
+  xpToday: number;
+  completedSessions: CompletedSession[];
+};
+
+const PARADIGM_MEMORY_KEY = 'PARADIGM_MEMORY_V1';
+
+function isParadigmMemory(value: unknown): value is ParadigmMemory {
+  if (!value || typeof value !== 'object') return false;
+
+  const memory = value as Record<string, unknown>;
+
+  if (!Number.isFinite(memory.xpToday)) return false;
+  if (!Array.isArray(memory.completedSessions)) return false;
+
+  return memory.completedSessions.every((session) => {
+    if (!session || typeof session !== 'object') return false;
+
+    const completedSession = session as Record<string, unknown>;
+
+    return (
+      typeof completedSession.nodeId === 'string' &&
+      typeof completedSession.nodeName === 'string' &&
+      Number.isFinite(completedSession.startedAt) &&
+      Number.isFinite(completedSession.completedAt) &&
+      Number.isFinite(completedSession.xpAwarded)
+    );
+  });
+}
+
 export default function App() {
   const [region, setRegion] = useState<Region | null>(null);
   const [userLocation, setUserLocation] =
@@ -41,6 +80,32 @@ export default function App() {
     startedAt: number;
   } | null>(null);
   const [xpToday, setXpToday] = useState(0);
+  const [completedSessions, setCompletedSessions] = useState<
+    CompletedSession[]
+  >([]);
+
+  useEffect(() => {
+    async function hydrateMemory() {
+      try {
+        const savedMemory = await AsyncStorage.getItem(
+          PARADIGM_MEMORY_KEY,
+        );
+
+        if (!savedMemory) return;
+
+        const parsedMemory: unknown = JSON.parse(savedMemory);
+
+        if (!isParadigmMemory(parsedMemory)) return;
+
+        setXpToday(parsedMemory.xpToday);
+        setCompletedSessions(parsedMemory.completedSessions);
+      } catch {
+        return;
+      }
+    }
+
+    hydrateMemory();
+  }, []);
 
   useEffect(() => {
     async function startWorld() {
@@ -280,8 +345,31 @@ export default function App() {
               if (selectedNode.id !== 'court') return;
 
               if (activeSession?.nodeId === selectedNode.id) {
-                setXpToday((currentXp) => currentXp + selectedNode.xp);
+                const completedAt = Date.now();
+                const nextXp = xpToday + selectedNode.xp;
+                const completedSession: CompletedSession = {
+                  nodeId: selectedNode.id,
+                  nodeName: selectedNode.name,
+                  startedAt: activeSession.startedAt,
+                  completedAt,
+                  xpAwarded: selectedNode.xp,
+                };
+                const nextCompletedSessions = [
+                  ...completedSessions,
+                  completedSession,
+                ];
+
+                setXpToday(nextXp);
+                setCompletedSessions(nextCompletedSessions);
                 setActiveSession(null);
+
+                AsyncStorage.setItem(
+                  PARADIGM_MEMORY_KEY,
+                  JSON.stringify({
+                    xpToday: nextXp,
+                    completedSessions: nextCompletedSessions,
+                  }),
+                ).catch(() => undefined);
                 return;
               }
 
