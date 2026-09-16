@@ -40,7 +40,84 @@ type ParadigmMemory = {
   completedSessions: CompletedSession[];
 };
 
+type BehavioralSignals = {
+  completedSessionCount: number;
+  distinctNodeCount: number;
+  totalCompletedXp: number;
+  averageSessionDurationMs: number;
+  lastCompletedAt: number | null;
+  consecutiveSameNodeCompletions: number;
+};
+
 const PARADIGM_MEMORY_KEY = 'PARADIGM_MEMORY_V1';
+
+function deriveBehavioralSignals(
+  completedSessions: CompletedSession[],
+): BehavioralSignals {
+  const completedSessionCount = completedSessions.length;
+  const distinctNodeCount = new Set(
+    completedSessions.map((session) => session.nodeId),
+  ).size;
+  const totalCompletedXp = completedSessions.reduce(
+    (total, session) => total + session.xpAwarded,
+    0,
+  );
+
+  const validDurations = completedSessions
+    .map((session) => ({
+      startedAt: session.startedAt,
+      completedAt: session.completedAt,
+    }))
+    .filter(
+      (session) =>
+        Number.isFinite(session.startedAt) &&
+        Number.isFinite(session.completedAt) &&
+        session.completedAt >= session.startedAt,
+    )
+    .map((session) => session.completedAt - session.startedAt);
+
+  const averageSessionDurationMs =
+    validDurations.length > 0
+      ? validDurations.reduce((total, duration) => total + duration, 0) /
+        validDurations.length
+      : 0;
+
+  const finiteCompletedAtValues = completedSessions
+    .map((session) => session.completedAt)
+    .filter((value) => Number.isFinite(value));
+
+  const lastCompletedAt =
+    finiteCompletedAtValues.length > 0
+      ? Math.max(...finiteCompletedAtValues)
+      : null;
+
+  const consecutiveSameNodeCompletions =
+    completedSessions.length === 0
+      ? 0
+      : (() => {
+          let streak = 0;
+          const finalNodeId = completedSessions[completedSessions.length - 1].nodeId;
+
+          for (let index = completedSessions.length - 1; index >= 0; index -= 1) {
+            if (completedSessions[index].nodeId !== finalNodeId) {
+              break;
+            }
+
+            streak += 1;
+          }
+
+          return streak;
+        })();
+
+  return {
+    completedSessionCount,
+    distinctNodeCount,
+    totalCompletedXp,
+    averageSessionDurationMs,
+    lastCompletedAt,
+    consecutiveSameNodeCompletions,
+  };
+}
 
 function isParadigmMemory(value: unknown): value is ParadigmMemory {
   if (!value || typeof value !== 'object') return false;
@@ -83,6 +160,11 @@ export default function App() {
   const [completedSessions, setCompletedSessions] = useState<
     CompletedSession[]
   >([]);
+
+  const behavioralSignals = useMemo(
+    () => deriveBehavioralSignals(completedSessions),
+    [completedSessions],
+  );
 
   useEffect(() => {
     async function hydrateMemory() {
@@ -300,6 +382,27 @@ export default function App() {
 
       {selectedNode ? (
         <View style={styles.bottomPanel}>
+          <View style={styles.debugSignals}>
+            <Text style={styles.debugSignalText}>
+              sessions: {behavioralSignals.completedSessionCount}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              nodes: {behavioralSignals.distinctNodeCount}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              xp: {behavioralSignals.totalCompletedXp}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              avg ms: {behavioralSignals.averageSessionDurationMs}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              last: {behavioralSignals.lastCompletedAt ?? '—'}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              streak: {behavioralSignals.consecutiveSameNodeCompletions}
+            </Text>
+          </View>
+
           <View style={styles.nodePanelHeader}>
             <View>
               <Text style={styles.nodePanelState}>
@@ -543,11 +646,28 @@ const styles = StyleSheet.create({
     marginTop: 5,
     fontSize: 13,
   },
+
+  debugSignals: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 14,
+  },
+
+  debugSignalText: {
+    color: '#d7d7dc',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    marginBottom: 2,
+  },
+
   nodePanelHeader: {
-  flexDirection: 'row',
-  justifyContent: 'space-between',
-  alignItems: 'flex-start',
-},
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
 
 nodePanelState: {
   color: '#7DFF89',
