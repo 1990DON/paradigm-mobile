@@ -34,6 +34,10 @@ export type Stage6SimulationResult = {
   consecutiveSameNodeCompletions: number;
 };
 
+export function calculateWalkingXp(walkingDistanceKm: number): number {
+  return walkingDistanceKm * WALK_XP_PER_KM;
+}
+
 function session(
   nodeId: string,
   nodeName: string,
@@ -110,7 +114,7 @@ export function simulateStage6Scenario(
 ): Stage6SimulationResult {
   const behavioralSignals = deriveBehavioralSignals(scenario.completedSessions);
   const perNodeXpProduced = deriveNodeXpTotals(scenario.completedSessions);
-  const simulatedWalkingXp = scenario.walkingDistanceKm * WALK_XP_PER_KM;
+  const simulatedWalkingXp = calculateWalkingXp(scenario.walkingDistanceKm);
 
   return {
     scenarioName: scenario.name,
