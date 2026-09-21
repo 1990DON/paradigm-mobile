@@ -28,6 +28,8 @@ export type Stage6PopulationConfig = {
   seed?: number;
   users?: number;
   days?: number;
+  nodeXp?: Partial<Record<'court' | 'bodega' | 'transit' | 'park', number>>;
+  walkingXpPerKm?: number;
 };
 
 export type Stage6PopulationProfile = {
@@ -167,6 +169,14 @@ function validateConfig(config: Required<Stage6PopulationConfig>): void {
   if (!Number.isSafeInteger(config.days) || config.days < 0) {
     throw new Error('Population days must be a non-negative safe integer');
   }
+  if (!Number.isFinite(config.walkingXpPerKm) || config.walkingXpPerKm < 0) {
+    throw new Error('Population walking XP rate must be finite and non-negative');
+  }
+  Object.values(config.nodeXp).forEach((xp) => {
+    if (!Number.isFinite(xp) || xp < 0) {
+      throw new Error('Population node XP must be finite and non-negative');
+    }
+  });
 }
 
 function resolveConfig(
@@ -176,12 +186,16 @@ function resolveConfig(
     seed: config.seed ?? DEFAULT_STAGE6_POPULATION_SEED,
     users: config.users ?? DEFAULT_STAGE6_POPULATION_USERS,
     days: config.days ?? DEFAULT_STAGE6_POPULATION_DAYS,
+    nodeXp: config.nodeXp ?? {},
+    walkingXpPerKm: config.walkingXpPerKm ?? 5,
   };
   validateConfig(resolved);
   return resolved;
 }
 
-function nodeXpById(): Record<string, number> {
+function nodeXpById(
+  overrides: Stage6PopulationConfig['nodeXp'],
+): Record<string, number> {
   const totals: Record<string, number> = {};
   stage6Scenarios.forEach((scenario) => {
     scenario.completedSessions.forEach((completedSession) => {
@@ -190,7 +204,7 @@ function nodeXpById(): Record<string, number> {
       }
     });
   });
-  return totals;
+  return { ...totals, ...overrides };
 }
 
 function archetypeForUser(userIndex: number): Stage6PopulationArchetype {
@@ -332,7 +346,7 @@ export function runStage6PopulationSimulation(
 ): Stage6PopulationResult {
   const config = resolveConfig(inputConfig);
   const random = new SeededRandom(config.seed);
-  const xpByNode = nodeXpById();
+  const xpByNode = nodeXpById(config.nodeXp);
   const profiles = makeProfiles(config.users);
   const perNodeXp: Record<string, number> = {};
   const dailyCombinedXp = Array.from({ length: config.days }, () => 0);
@@ -357,7 +371,10 @@ export function runStage6PopulationSimulation(
       completedSessions: user.completedSessions,
       walkingDistanceKm: user.walkingDistanceKm,
     });
-    const walkingXp = calculateWalkingXp(user.walkingDistanceKm);
+    const walkingXp = calculateWalkingXp(
+      user.walkingDistanceKm,
+      config.walkingXpPerKm,
+    );
     const profile = profiles[archetype];
 
     totalSessions += simulation.completedSessionCount;

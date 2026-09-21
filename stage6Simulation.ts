@@ -34,8 +34,11 @@ export type Stage6SimulationResult = {
   consecutiveSameNodeCompletions: number;
 };
 
-export function calculateWalkingXp(walkingDistanceKm: number): number {
-  return walkingDistanceKm * WALK_XP_PER_KM;
+export function calculateWalkingXp(
+  walkingDistanceKm: number,
+  xpPerKm = WALK_XP_PER_KM,
+): number {
+  return walkingDistanceKm * xpPerKm;
 }
 
 function session(
