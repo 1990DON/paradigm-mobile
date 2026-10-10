@@ -9,6 +9,12 @@ import {
 import MapView, { Marker, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { StatusBar } from 'expo-status-bar';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  BehavioralSignals,
+  CompletedSession,
+  deriveBehavioralSignals,
+} from './behavioralSignals';
 
 type Coordinate = {
   latitude: number;
@@ -26,6 +32,36 @@ type ParadigmNode = {
   coordinate: Coordinate;
 };
 
+type ParadigmMemory = {
+  xpToday: number;
+  completedSessions: CompletedSession[];
+};
+
+const PARADIGM_MEMORY_KEY = 'PARADIGM_MEMORY_V1';
+
+function isParadigmMemory(value: unknown): value is ParadigmMemory {
+  if (!value || typeof value !== 'object') return false;
+
+  const memory = value as Record<string, unknown>;
+
+  if (!Number.isFinite(memory.xpToday)) return false;
+  if (!Array.isArray(memory.completedSessions)) return false;
+
+  return memory.completedSessions.every((session) => {
+    if (!session || typeof session !== 'object') return false;
+
+    const completedSession = session as Record<string, unknown>;
+
+    return (
+      typeof completedSession.nodeId === 'string' &&
+      typeof completedSession.nodeName === 'string' &&
+      Number.isFinite(completedSession.startedAt) &&
+      Number.isFinite(completedSession.completedAt) &&
+      Number.isFinite(completedSession.xpAwarded)
+    );
+  });
+}
+
 export default function App() {
   const [region, setRegion] = useState<Region | null>(null);
   const [userLocation, setUserLocation] =
@@ -34,7 +70,44 @@ export default function App() {
   const [worldStatus, setWorldStatus] =
     useState('LOCATING...');
 
-    const [ selectedNode, setSelectedNode ] = useState<ParadigmNode | null>(null);
+  const [selectedNode, setSelectedNode] =
+    useState<ParadigmNode | null>(null);
+  const [activeSession, setActiveSession] = useState<{
+    nodeId: string;
+    startedAt: number;
+  } | null>(null);
+  const [xpToday, setXpToday] = useState(0);
+  const [completedSessions, setCompletedSessions] = useState<
+    CompletedSession[]
+  >([]);
+
+  const behavioralSignals = useMemo(
+    () => deriveBehavioralSignals(completedSessions),
+    [completedSessions],
+  );
+
+  useEffect(() => {
+    async function hydrateMemory() {
+      try {
+        const savedMemory = await AsyncStorage.getItem(
+          PARADIGM_MEMORY_KEY,
+        );
+
+        if (!savedMemory) return;
+
+        const parsedMemory: unknown = JSON.parse(savedMemory);
+
+        if (!isParadigmMemory(parsedMemory)) return;
+
+        setXpToday(parsedMemory.xpToday);
+        setCompletedSessions(parsedMemory.completedSessions);
+      } catch {
+        return;
+      }
+    }
+
+    hydrateMemory();
+  }, []);
 
   useEffect(() => {
     async function startWorld() {
@@ -218,7 +291,7 @@ export default function App() {
 
         <View style={styles.xpBox}>
           <Text style={styles.xpValue}>
-            0
+            {xpToday}
           </Text>
 
           <Text style={styles.xpLabel}>
@@ -228,63 +301,129 @@ export default function App() {
       </View>
 
       {selectedNode ? (
-  <View style={styles.bottomPanel}>
-    <View style={styles.nodePanelHeader}>
-      <View>
-        <Text style={styles.nodePanelState}>
-          {selectedNode.state}
-        </Text>
+        <View style={styles.bottomPanel}>
+          <View style={styles.debugSignals}>
+            <Text style={styles.debugSignalText}>
+              sessions: {behavioralSignals.completedSessionCount}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              nodes: {behavioralSignals.distinctNodeCount}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              xp: {behavioralSignals.totalCompletedXp}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              avg ms: {behavioralSignals.averageSessionDurationMs}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              last: {behavioralSignals.lastCompletedAt ?? '—'}
+            </Text>
+            <Text style={styles.debugSignalText}>
+              streak: {behavioralSignals.consecutiveSameNodeCompletions}
+            </Text>
+          </View>
 
-        <Text style={styles.nodePanelTitle}>
-          {selectedNode.emoji} {selectedNode.name}
-        </Text>
-      </View>
+          <View style={styles.nodePanelHeader}>
+            <View>
+              <Text style={styles.nodePanelState}>
+                {selectedNode.id === 'court' &&
+                activeSession?.nodeId === selectedNode.id
+                  ? 'PARTICIPATING'
+                  : selectedNode.state}
+              </Text>
 
-      <Pressable
-        onPress={() => setSelectedNode(null)}
-        style={styles.closeButton}
-      >
-        <Text style={styles.closeButtonText}>×</Text>
-      </Pressable>
-    </View>
+              <Text style={styles.nodePanelTitle}>
+                {selectedNode.emoji} {selectedNode.name}
+              </Text>
+            </View>
 
-    <Text style={styles.nodePanelXP}>
-      +{selectedNode.xp} XP opportunity
-    </Text>
+            <Pressable
+              onPress={() => setSelectedNode(null)}
+              style={styles.closeButton}
+            >
+              <Text style={styles.closeButtonText}>×</Text>
+            </Pressable>
+          </View>
 
-    <Text style={styles.nodePanelMeaning}>
-      {selectedNode.id === 'court' &&
-        'Activity is happening here. Participate to build court history.'}
+          <Text style={styles.nodePanelXP}>
+            +{selectedNode.xp} XP opportunity
+          </Text>
 
-      {selectedNode.id === 'bodega' &&
-        'A familiar place in your world. Repeated visits strengthen your relationship here.'}
+          <Text style={styles.nodePanelMeaning}>
+            {selectedNode.id === 'court' &&
+              'Activity is happening here. Participate to build court history.'}
 
-      {selectedNode.id === 'transit' &&
-        'Movement is boosted in this zone right now.'}
+            {selectedNode.id === 'bodega' &&
+              'A familiar place in your world. Repeated visits strengthen your relationship here.'}
 
-      {selectedNode.id === 'park' &&
-        'New territory. Explore this place to begin building history.'}
-    </Text>
+            {selectedNode.id === 'transit' &&
+              'Movement is boosted in this zone right now.'}
 
-    <Pressable style={styles.participateButton}>
-      <Text style={styles.participateButtonText}>
-        {selectedNode.id === 'court'
-          ? 'BEGIN PARTICIPATION'
-          : 'VIEW OPPORTUNITY'}
-      </Text>
-    </Pressable>
-  </View>
-) : (
-  <View style={styles.bottomPanel}>
-    <Text style={styles.worldTitle}>
-      YOUR WORLD IS ACTIVE
-    </Text>
+            {selectedNode.id === 'park' &&
+              'New territory. Explore this place to begin building history.'}
+          </Text>
 
-    <Text style={styles.worldSubtitle}>
-      Move through the city. Participate. Build history.
-    </Text>
-  </View>
-)}
+          <Pressable
+            onPress={() => {
+              if (selectedNode.id !== 'court') return;
+
+              if (activeSession?.nodeId === selectedNode.id) {
+                const completedAt = Date.now();
+                const nextXp = xpToday + selectedNode.xp;
+                const completedSession: CompletedSession = {
+                  nodeId: selectedNode.id,
+                  nodeName: selectedNode.name,
+                  startedAt: activeSession.startedAt,
+                  completedAt,
+                  xpAwarded: selectedNode.xp,
+                };
+                const nextCompletedSessions = [
+                  ...completedSessions,
+                  completedSession,
+                ];
+
+                setXpToday(nextXp);
+                setCompletedSessions(nextCompletedSessions);
+                setActiveSession(null);
+
+                AsyncStorage.setItem(
+                  PARADIGM_MEMORY_KEY,
+                  JSON.stringify({
+                    xpToday: nextXp,
+                    completedSessions: nextCompletedSessions,
+                  }),
+                ).catch(() => undefined);
+                return;
+              }
+
+              setActiveSession({
+                nodeId: selectedNode.id,
+                startedAt: Date.now(),
+              });
+            }}
+            style={styles.participateButton}
+          >
+            <Text style={styles.participateButtonText}>
+              {selectedNode.id === 'court' &&
+              activeSession?.nodeId === selectedNode.id
+                ? 'COMPLETE PARTICIPATION'
+                : selectedNode.id === 'court'
+                  ? 'BEGIN PARTICIPATION'
+                  : 'VIEW OPPORTUNITY'}
+            </Text>
+          </Pressable>
+        </View>
+      ) : (
+        <View style={styles.bottomPanel}>
+          <Text style={styles.worldTitle}>
+            YOUR WORLD IS ACTIVE
+          </Text>
+
+          <Text style={styles.worldSubtitle}>
+            Move through the city. Participate. Build history.
+          </Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -427,11 +566,28 @@ const styles = StyleSheet.create({
     marginTop: 5,
     fontSize: 13,
   },
+
+  debugSignals: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 14,
+  },
+
+  debugSignalText: {
+    color: '#d7d7dc',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    marginBottom: 2,
+  },
+
   nodePanelHeader: {
-  flexDirection: 'row',
-  justifyContent: 'space-between',
-  alignItems: 'flex-start',
-},
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
 
 nodePanelState: {
   color: '#7DFF89',
