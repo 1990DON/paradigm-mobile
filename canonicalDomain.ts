@@ -8,6 +8,8 @@ declare const userIdBrand: unique symbol;
 declare const nodeIdBrand: unique symbol;
 declare const activitySessionIdBrand: unique symbol;
 declare const xpEntryIdBrand: unique symbol;
+declare const canonicalObservationIdBrand: unique symbol;
+declare const canonicalEventIdBrand: unique symbol;
 
 export type UserId = string & { readonly [userIdBrand]: true };
 export type NodeId = string & { readonly [nodeIdBrand]: true };
@@ -15,6 +17,12 @@ export type ActivitySessionId = string & {
   readonly [activitySessionIdBrand]: true;
 };
 export type XPEntryId = string & { readonly [xpEntryIdBrand]: true };
+export type CanonicalObservationId = string & {
+  readonly [canonicalObservationIdBrand]: true;
+};
+export type CanonicalEventId = string & {
+  readonly [canonicalEventIdBrand]: true;
+};
 
 function parseId<Id extends string>(
   value: string,
@@ -31,6 +39,12 @@ export const parseActivitySessionId = (
 ): ActivitySessionId | null => parseId<ActivitySessionId>(value);
 export const parseXPEntryId = (value: string): XPEntryId | null =>
   parseId<XPEntryId>(value);
+export const parseCanonicalObservationId = (
+  value: string,
+): CanonicalObservationId | null => parseId<CanonicalObservationId>(value);
+export const parseCanonicalEventId = (
+  value: string,
+): CanonicalEventId | null => parseId<CanonicalEventId>(value);
 
 export type UserRecord = {
   id: UserId;
@@ -55,6 +69,7 @@ export type NodeRecord = {
   id: NodeId;
   name: string;
   geography: NodeGeography;
+  displayLocation?: GeographicLocation;
 };
 
 export const EXISTING_NODE_IDS = [
@@ -100,6 +115,7 @@ export type WalkingDistanceSource =
 export type GpsPresenceFix = {
   sessionId: ActivitySessionId;
   nodeId: NodeId;
+  userId?: UserId;
   observedAt: number;
   location: GeographicLocation;
   accuracyMeters: number;
@@ -179,6 +195,64 @@ export type XPEntry = {
   awardedAt: number;
   idempotencyKey: string;
 };
+
+export type EvidenceStatus =
+  | 'unverified'
+  | 'verified'
+  | 'simulated';
+
+export type LocationObservationKind =
+  | 'walking'
+  | 'presence'
+  | 'participation';
+
+export type LocationObservation = {
+  id: CanonicalObservationId;
+  userId: UserId;
+  sessionId: ActivitySessionId;
+  kind: LocationObservationKind;
+  nodeId?: NodeId;
+  observedAt: number;
+  location?: GeographicLocation;
+  evidenceStatus: EvidenceStatus;
+  source: string;
+  idempotencyKey: string;
+};
+
+export type CanonicalEventKind =
+  | 'walking_observation'
+  | 'presence_observation'
+  | 'participation_observation';
+
+export type CanonicalEventRecord = {
+  id: CanonicalEventId;
+  userId: UserId;
+  sessionId: ActivitySessionId;
+  kind: CanonicalEventKind;
+  nodeId?: NodeId;
+  occurredAt: number;
+  evidenceStatus: EvidenceStatus;
+  observationIds: readonly CanonicalObservationId[];
+  idempotencyKey: string;
+};
+
+export type RecordedObservationResult =
+  | {
+      status: 'added';
+      observations: readonly LocationObservation[];
+      observation: LocationObservation;
+    }
+  | {
+      status: 'duplicate';
+      observations: readonly LocationObservation[];
+      observation: LocationObservation;
+    }
+  | { status: 'conflict'; observations: readonly LocationObservation[]; errors: string[] };
+
+export type RecordedEventResult =
+  | { status: 'added'; events: readonly CanonicalEventRecord[]; event: CanonicalEventRecord }
+  | { status: 'duplicate'; events: readonly CanonicalEventRecord[]; event: CanonicalEventRecord }
+  | { status: 'conflict'; events: readonly CanonicalEventRecord[]; errors: string[] };
 
 export type ValidationResult<T> =
   | { valid: true; value: T }
@@ -416,6 +490,12 @@ export function validateNodeRecord(value: unknown): ValidationResult<NodeRecord>
   } else if (geography.verification !== 'unverified') {
     errors.push('Node geography verification state is invalid.');
   }
+  if (
+    value.displayLocation !== undefined &&
+    !isValidLocation(value.displayLocation)
+  ) {
+    errors.push('Node displayLocation must be a valid temporary position.');
+  }
 
   return errors.length > 0
     ? { valid: false, errors }
@@ -426,7 +506,9 @@ function validatePresenceVerification(
   value: unknown,
   session: {
     id: unknown;
+    userId: unknown;
     nodeId: unknown;
+    status: unknown;
     startedAt: unknown;
     completedAt: unknown;
   },
@@ -440,6 +522,16 @@ function validatePresenceVerification(
   const errors: string[] = [];
   if (!isFiniteNonNegative(value.verifiedAt)) {
     errors.push('GPS verification timestamp is invalid.');
+  } else if (
+    session.status !== 'completed' ||
+    !isFiniteNonNegative(session.completedAt) ||
+    !isFiniteNonNegative(session.startedAt) ||
+    value.verifiedAt < session.startedAt ||
+    value.verifiedAt > session.completedAt
+  ) {
+    errors.push(
+      'GPS verification timestamp must fall within the completed session interval.',
+    );
   }
   if (!Array.isArray(value.evidence) || value.evidence.length === 0) {
     errors.push('GPS verification requires at least one evidence fix.');
@@ -449,6 +541,8 @@ function validatePresenceVerification(
         !isRecord(fix) ||
         !isNonEmptyString(fix.sessionId) ||
         fix.sessionId !== session.id ||
+        !isNonEmptyString(fix.userId) ||
+        fix.userId !== session.userId ||
         !isNonEmptyString(fix.nodeId) ||
         fix.nodeId !== session.nodeId ||
         !isFiniteNonNegative(fix.observedAt) ||
@@ -540,7 +634,9 @@ export function validateActivitySession(
       errors.push(
         ...validatePresenceVerification(value.evidence.verification, {
           id: value.id,
+          userId: value.userId,
           nodeId: value.nodeId,
+          status: value.status,
           startedAt: value.startedAt,
           completedAt: value.completedAt,
         }),
@@ -565,6 +661,526 @@ export function validateActivitySession(
   return errors.length > 0
     ? { valid: false, errors }
     : { valid: true, value: value as unknown as ActivitySession };
+}
+
+const observationKindToCategory: Record<
+  LocationObservationKind,
+  ActivityCategory
+> = {
+  walking: 'walking',
+  presence: 'presence',
+  participation: 'participation',
+};
+
+const eventKindToObservationKind: Record<
+  CanonicalEventKind,
+  LocationObservationKind
+> = {
+  walking_observation: 'walking',
+  presence_observation: 'presence',
+  participation_observation: 'participation',
+};
+
+export function validateLocationObservation(
+  value: unknown,
+  sessions: readonly ActivitySession[],
+  nodes: readonly NodeRecord[],
+): ValidationResult<LocationObservation> {
+  if (!isRecord(value)) {
+    return { valid: false, errors: ['Location observation must be an object.'] };
+  }
+
+  const errors: string[] = [];
+  if (!isNonEmptyString(value.id)) errors.push('Observation id is required.');
+  if (!isNonEmptyString(value.userId)) errors.push('Observation userId is required.');
+  if (!isNonEmptyString(value.sessionId)) errors.push('Observation sessionId is required.');
+  if (
+    value.kind !== 'walking' &&
+    value.kind !== 'presence' &&
+    value.kind !== 'participation'
+  ) {
+    errors.push('Observation kind is invalid.');
+  }
+  if (!isFiniteNonNegative(value.observedAt)) {
+    errors.push('Observation observedAt must be a non-negative timestamp.');
+  }
+  if (
+    value.evidenceStatus !== 'unverified' &&
+    value.evidenceStatus !== 'verified' &&
+    value.evidenceStatus !== 'simulated'
+  ) {
+    errors.push('Observation evidenceStatus is invalid.');
+  }
+  if (!isNonEmptyString(value.source)) {
+    errors.push('Observation source is required.');
+  }
+  if (!isNonEmptyString(value.idempotencyKey)) {
+    errors.push('Observation idempotencyKey is required.');
+  }
+
+  const session = sessions.find(
+    (candidate) => candidate.id === value.sessionId,
+  );
+  if (!session) {
+    errors.push('Observation session does not exist.');
+  } else {
+    if (session.userId !== value.userId) {
+      errors.push('Observation userId must match its source session.');
+    }
+    if (
+      value.kind !== undefined &&
+      observationKindToCategory[value.kind as LocationObservationKind] !==
+        session.activityType
+    ) {
+      errors.push('Observation kind must match its source activity session.');
+    }
+    if (!isFiniteNonNegative(value.observedAt)) {
+      // Timestamp shape is reported above.
+    } else if (value.observedAt < session.startedAt) {
+      errors.push('Observation timestamp precedes its session interval.');
+    } else if (
+      session.status === 'completed' &&
+      value.observedAt > session.completedAt
+    ) {
+      errors.push('Observation timestamp exceeds its session interval.');
+    }
+
+    if (value.kind === 'walking') {
+      if (
+        value.nodeId !== undefined &&
+        (!isNonEmptyString(value.nodeId) ||
+          !nodes.some((node) => node.id === value.nodeId))
+      ) {
+        errors.push('Walking observation references an unknown node.');
+      }
+      if (session.activityType === 'walking' && value.nodeId !== session.nodeId) {
+        errors.push('Walking observation nodeId must match its session node.');
+      }
+    } else if (value.kind === 'presence' || value.kind === 'participation') {
+      if (!isNonEmptyString(value.nodeId)) {
+        errors.push(`${value.kind} observation requires a nodeId.`);
+      } else if (!nodes.some((node) => node.id === value.nodeId)) {
+        errors.push(`${value.kind} observation references an unknown node.`);
+      } else if (
+        session.nodeId !== undefined &&
+        value.nodeId !== session.nodeId
+      ) {
+        errors.push('Observation nodeId must match its source session.');
+      }
+    }
+  }
+
+  if (
+    (value.kind === 'walking' || value.kind === 'presence') &&
+    !isValidLocation(value.location)
+  ) {
+    errors.push('Walking and presence observations require a valid location.');
+  } else if (value.location !== undefined && !isValidLocation(value.location)) {
+    errors.push('Observation location is invalid.');
+  }
+
+  if (value.evidenceStatus === 'simulated' && value.source === 'gps') {
+    errors.push('GPS evidence cannot be marked simulated.');
+  }
+
+  if (value.evidenceStatus === 'verified' && value.kind === 'presence') {
+    const node = nodes.find((candidate) => candidate.id === value.nodeId);
+    if (
+      !node ||
+      value.source !== 'gps' ||
+      node.geography.verification !== 'verified' ||
+      !isValidLocation(value.location) ||
+      !isInsideBoundary(value.location, node.geography.boundary)
+    ) {
+      errors.push(
+        'Verified presence observation requires verified node geography.',
+      );
+    }
+  }
+
+  return errors.length > 0
+    ? { valid: false, errors }
+    : { valid: true, value: value as unknown as LocationObservation };
+}
+
+export function validateCanonicalEvent(
+  value: unknown,
+  observations: readonly LocationObservation[],
+  sessions: readonly ActivitySession[],
+  nodes: readonly NodeRecord[],
+): ValidationResult<CanonicalEventRecord> {
+  if (!isRecord(value)) {
+    return { valid: false, errors: ['Canonical event must be an object.'] };
+  }
+
+  const errors: string[] = [];
+  if (!isNonEmptyString(value.id)) errors.push('Canonical event id is required.');
+  if (!isNonEmptyString(value.userId)) errors.push('Canonical event userId is required.');
+  if (!isNonEmptyString(value.sessionId)) errors.push('Canonical event sessionId is required.');
+  if (
+    value.kind !== 'walking_observation' &&
+    value.kind !== 'presence_observation' &&
+    value.kind !== 'participation_observation'
+  ) {
+    errors.push('Canonical event kind is invalid.');
+  }
+  if (!isFiniteNonNegative(value.occurredAt)) {
+    errors.push('Canonical event occurredAt must be a non-negative timestamp.');
+  }
+  if (
+    value.evidenceStatus !== 'unverified' &&
+    value.evidenceStatus !== 'verified' &&
+    value.evidenceStatus !== 'simulated'
+  ) {
+    errors.push('Canonical event evidenceStatus is invalid.');
+  }
+  if (!isNonEmptyString(value.idempotencyKey)) {
+    errors.push('Canonical event idempotencyKey is required.');
+  }
+  if (!Array.isArray(value.observationIds) || value.observationIds.length === 0) {
+    errors.push('Canonical event requires at least one observation id.');
+  } else if (
+    !value.observationIds.every((id) => isNonEmptyString(id)) ||
+    new Set(value.observationIds).size !== value.observationIds.length
+  ) {
+    errors.push('Canonical event observationIds must be unique non-empty ids.');
+  }
+
+  const session = sessions.find(
+    (candidate) => candidate.id === value.sessionId,
+  );
+  const expectedKind =
+    value.kind !== undefined
+      ? eventKindToObservationKind[value.kind as CanonicalEventKind]
+      : undefined;
+
+  if (!session) {
+    errors.push('Canonical event session does not exist.');
+  } else {
+    if (session.userId !== value.userId) {
+      errors.push('Canonical event userId must match its source session.');
+    }
+    if (
+      expectedKind !== undefined &&
+      observationKindToCategory[expectedKind] !== session.activityType
+    ) {
+      errors.push('Canonical event kind must match its source activity session.');
+    }
+    if (expectedKind === 'walking' && value.nodeId !== undefined) {
+      if (!nodes.some((node) => node.id === value.nodeId)) {
+        errors.push('Canonical walking event references an unknown node.');
+      } else if (
+        session.activityType === 'walking' &&
+        value.nodeId !== session.nodeId
+      ) {
+        errors.push('Canonical walking event nodeId must match its session node.');
+      }
+    } else if (
+      (expectedKind === 'presence' || expectedKind === 'participation') &&
+      (!isNonEmptyString(value.nodeId) ||
+        !nodes.some((node) => node.id === value.nodeId) ||
+        value.nodeId !== session.nodeId)
+    ) {
+      errors.push(
+        'Canonical presence and participation events require the session node.',
+      );
+    }
+  }
+
+  if (Array.isArray(value.observationIds) && value.observationIds.length > 0) {
+    let latestObservationAt = -1;
+    value.observationIds.forEach((observationId) => {
+      const observation = observations.find(
+        (candidate) => candidate.id === observationId,
+      );
+      if (!observation) {
+        errors.push(
+          `Canonical event references unknown observation ${String(observationId)}.`,
+        );
+        return;
+      }
+
+      latestObservationAt = Math.max(latestObservationAt, observation.observedAt);
+      const observationValidation = validateLocationObservation(
+        observation,
+        sessions,
+        nodes,
+      );
+      if (!observationValidation.valid) {
+        errors.push('Canonical event contains invalid observation evidence.');
+      }
+      if (
+        observation.userId !== value.userId ||
+        observation.sessionId !== value.sessionId ||
+        (expectedKind !== undefined && observation.kind !== expectedKind)
+      ) {
+        errors.push(
+          'Canonical event observation evidence is not bound to the event.',
+        );
+      }
+      if (
+        value.nodeId !== undefined &&
+        observation.nodeId !== value.nodeId
+      ) {
+        errors.push('Canonical event nodeId does not match its observations.');
+      }
+      if (observation.evidenceStatus !== value.evidenceStatus) {
+        errors.push(
+          'Canonical event evidenceStatus must match its observation evidence.',
+        );
+      }
+    });
+
+    if (
+      isFiniteNonNegative(value.occurredAt) &&
+      latestObservationAt >= 0 &&
+      value.occurredAt < latestObservationAt
+    ) {
+      errors.push('Canonical event occurredAt precedes its observation evidence.');
+    }
+  }
+
+  if (
+    session &&
+    isFiniteNonNegative(value.occurredAt) &&
+    value.occurredAt < session.startedAt
+  ) {
+    errors.push('Canonical event timestamp precedes its session interval.');
+  } else if (
+    session?.status === 'completed' &&
+    isFiniteNonNegative(value.occurredAt) &&
+    value.occurredAt > session.completedAt
+  ) {
+    errors.push('Canonical event timestamp exceeds its session interval.');
+  }
+
+  return errors.length > 0
+    ? { valid: false, errors }
+    : { valid: true, value: value as unknown as CanonicalEventRecord };
+}
+
+export type AcceptedAuthoritativeEvent = CanonicalEventRecord & {
+  authoritativeEvidence: 'accepted';
+};
+
+export function recordLocationObservation(
+  observations: readonly LocationObservation[],
+  candidate: LocationObservation,
+): RecordedObservationResult {
+  const sameId = observations.find(
+    (observation) => observation.id === candidate.id,
+  );
+  const sameKey = observations.find(
+    (observation) => observation.idempotencyKey === candidate.idempotencyKey,
+  );
+  const existing = sameId ?? sameKey;
+  if (!existing) {
+    return {
+      status: 'added',
+      observations: [...observations, candidate],
+      observation: candidate,
+    };
+  }
+
+  const samePayload =
+    existing.id === candidate.id &&
+    existing.idempotencyKey === candidate.idempotencyKey &&
+    existing.userId === candidate.userId &&
+    existing.sessionId === candidate.sessionId &&
+    existing.kind === candidate.kind &&
+    existing.nodeId === candidate.nodeId &&
+    existing.observedAt === candidate.observedAt &&
+    existing.location?.latitude === candidate.location?.latitude &&
+    existing.location?.longitude === candidate.location?.longitude &&
+    existing.evidenceStatus === candidate.evidenceStatus &&
+    existing.source === candidate.source;
+  return samePayload
+    ? { status: 'duplicate', observations, observation: existing }
+    : {
+        status: 'conflict',
+        observations,
+        errors: [
+          'Observation id or idempotencyKey belongs to conflicting evidence.',
+        ],
+      };
+}
+
+export function recordCanonicalEvent(
+  events: readonly CanonicalEventRecord[],
+  candidate: CanonicalEventRecord,
+): RecordedEventResult {
+  const existing = events.find(
+    (event) =>
+      event.id === candidate.id ||
+      event.idempotencyKey === candidate.idempotencyKey,
+  );
+  if (!existing) {
+    return { status: 'added', events: [...events, candidate], event: candidate };
+  }
+
+  const samePayload =
+    existing.id === candidate.id &&
+    existing.idempotencyKey === candidate.idempotencyKey &&
+    existing.userId === candidate.userId &&
+    existing.sessionId === candidate.sessionId &&
+    existing.kind === candidate.kind &&
+    existing.nodeId === candidate.nodeId &&
+    existing.occurredAt === candidate.occurredAt &&
+    existing.evidenceStatus === candidate.evidenceStatus &&
+    existing.observationIds.length === candidate.observationIds.length &&
+    existing.observationIds.every(
+      (observationId, index) =>
+        observationId === candidate.observationIds[index],
+    );
+  return samePayload
+    ? { status: 'duplicate', events, event: existing }
+    : {
+        status: 'conflict',
+        events,
+        errors: [
+          'Canonical event id or idempotencyKey belongs to conflicting evidence.',
+        ],
+      };
+}
+
+export function sortCanonicalEvents(
+  events: readonly CanonicalEventRecord[],
+): readonly CanonicalEventRecord[] {
+  return [...events].sort((first, second) => {
+    if (first.occurredAt !== second.occurredAt) {
+      return first.occurredAt - second.occurredAt;
+    }
+    if (first.sessionId !== second.sessionId) {
+      return first.sessionId < second.sessionId ? -1 : 1;
+    }
+    return first.id < second.id ? -1 : first.id > second.id ? 1 : 0;
+  });
+}
+
+export function sortLocationObservations(
+  observations: readonly LocationObservation[],
+): readonly LocationObservation[] {
+  return [...observations].sort((first, second) => {
+    if (first.observedAt !== second.observedAt) {
+      return first.observedAt - second.observedAt;
+    }
+    if (first.sessionId !== second.sessionId) {
+      return first.sessionId < second.sessionId ? -1 : 1;
+    }
+    return first.id < second.id ? -1 : first.id > second.id ? 1 : 0;
+  });
+}
+
+export function deriveAcceptedAuthoritativeEvents(
+  events: readonly CanonicalEventRecord[],
+  observations: readonly LocationObservation[],
+  sessions: readonly ActivitySession[],
+  nodes: readonly NodeRecord[],
+): ValidationResult<readonly AcceptedAuthoritativeEvent[]> {
+  const accepted: AcceptedAuthoritativeEvent[] = [];
+
+  for (const event of sortCanonicalEvents(events)) {
+    const eventValidation = validateCanonicalEvent(
+      event,
+      observations,
+      sessions,
+      nodes,
+    );
+    if (!eventValidation.valid) {
+      return {
+        valid: false,
+        errors: [`Event ${event.id}: ${eventValidation.errors.join(' ')}`],
+      };
+    }
+    if (event.evidenceStatus !== 'verified') continue;
+
+    const session = sessions.find(
+      (candidate) => candidate.id === event.sessionId,
+    );
+    if (!session) continue;
+    const eventObservations = observations.filter((observation) =>
+      event.observationIds.includes(observation.id),
+    );
+
+    if (
+      event.kind === 'walking_observation' &&
+      session.activityType === 'walking'
+    ) {
+      const evidenceIsRealWorld =
+        session.evidence.distanceSource !== 'simulated' &&
+        eventObservations.length > 0 &&
+        eventObservations.every(
+          (observation) =>
+            observation.evidenceStatus === 'verified' &&
+            observation.source !== 'simulation' &&
+            observation.source !== 'simulated' &&
+            observation.source !== 'manual',
+        );
+      if (evidenceIsRealWorld) {
+        accepted.push({ ...eventValidation.value, authoritativeEvidence: 'accepted' });
+      }
+      continue;
+    }
+
+    if (
+      event.kind === 'presence_observation' &&
+      session.activityType === 'presence'
+    ) {
+      const node = nodes.find((candidate) => candidate.id === session.nodeId);
+      const evidenceIsGps = eventObservations.every(
+        (observation) =>
+          observation.source === 'gps' &&
+          observation.evidenceStatus === 'verified' &&
+          observation.userId === session.userId &&
+          observation.sessionId === session.id &&
+          observation.nodeId === session.nodeId &&
+          isValidLocation(observation.location),
+      );
+      const evidenceMatchesSessionFix =
+        session.evidence.verification.status === 'verified' &&
+        session.evidence.verification.method === 'gps' &&
+        eventObservations.every((observation) =>
+          session.evidence.verification.status === 'verified' &&
+          session.evidence.verification.evidence.some(
+            (fix) =>
+              fix.userId === session.userId &&
+              fix.sessionId === session.id &&
+              fix.nodeId === session.nodeId &&
+              fix.observedAt === observation.observedAt &&
+              fix.location.latitude === observation.location?.latitude &&
+              fix.location.longitude === observation.location?.longitude,
+          ),
+        );
+      const eligible =
+        node &&
+        evidenceIsGps &&
+        evidenceMatchesSessionFix &&
+        canQualifyForGpsVerifiedPresence(session, node).status === 'eligible';
+      if (eligible) {
+        accepted.push({ ...eventValidation.value, authoritativeEvidence: 'accepted' });
+      }
+      continue;
+    }
+
+    if (
+      event.kind === 'participation_observation' &&
+      session.activityType === 'participation'
+    ) {
+      const evidenceIsRealWorld =
+        session.evidence.source === 'organized' &&
+        eventObservations.length > 0 &&
+        eventObservations.every(
+          (observation) =>
+            observation.evidenceStatus === 'verified' &&
+            observation.source === 'organized',
+        );
+      if (evidenceIsRealWorld) {
+        accepted.push({ ...eventValidation.value, authoritativeEvidence: 'accepted' });
+      }
+    }
+  }
+
+  return { valid: true, value: accepted };
 }
 
 export type GpsPresenceEligibility =
@@ -738,6 +1354,15 @@ export function validateXPEntry(
       const session = validatedSession.value;
       if (session.status !== 'completed') {
         errors.push('XP entry source session must be completed.');
+      }
+      if (
+        session.status === 'completed' &&
+        isFiniteNonNegative(value.awardedAt) &&
+        value.awardedAt < session.completedAt
+      ) {
+        errors.push(
+          'XP entry awardedAt cannot precede its source session completion.',
+        );
       }
       if (session.userId !== value.userId) {
         errors.push('XP entry userId must match its source session.');

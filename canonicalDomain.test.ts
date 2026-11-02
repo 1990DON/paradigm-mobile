@@ -1,17 +1,22 @@
 import {
   ActivitySession,
   ActivitySessionId,
+  CanonicalEventId,
+  CanonicalEventRecord,
+  CanonicalObservationId,
   EconomyVersion,
   EXISTING_NODE_IDS,
   EXISTING_NODE_RECORDS,
   NodeId,
   NodeRecord,
+  LocationObservation,
   ParticipationSession,
   PresenceSession,
   XPEntry,
   XPEntryId,
   WalkingSession,
   canQualifyForGpsVerifiedPresence,
+  deriveAcceptedAuthoritativeEvents,
   completeActivitySession,
   deriveActivityHistory,
   deriveCanonicalBehavioralSignals,
@@ -22,11 +27,19 @@ import {
   deriveXPProjections,
   inspectLegacyMemory,
   parseActivitySessionId,
+  parseCanonicalEventId,
+  parseCanonicalObservationId,
   parseNodeId,
   parseUserId,
   parseXPEntryId,
   recordXPEntry,
+  recordCanonicalEvent,
+  recordLocationObservation,
+  sortCanonicalEvents,
+  sortLocationObservations,
   validateActivitySession,
+  validateCanonicalEvent,
+  validateLocationObservation,
   validateXPEntry,
 } from './canonicalDomain';
 import { calculateWalkingXp } from './stage6Simulation';
@@ -108,6 +121,7 @@ const VERIFIED_PRESENCE_EVIDENCE: Extract<
     {
       sessionId: PRESENCE_ID,
       nodeId: PARK_ID,
+      userId: TEST_USER_ID,
       observedAt: 4000,
       location: { latitude: 0, longitude: 0 },
       accuracyMeters: 10,
@@ -278,6 +292,20 @@ export function runCanonicalDomainTests(): void {
     'A GPS fix outside the completed session interval must be rejected.',
   );
 
+  const verificationOutsideInterval: PresenceSession = {
+    ...presence,
+    evidence: {
+      verification: {
+        ...VERIFIED_PRESENCE_EVIDENCE,
+        verifiedAt: 2999,
+      },
+    },
+  };
+  assert(
+    !validateActivitySession(verificationOutsideInterval, TEST_NODES).valid,
+    'A GPS verification timestamp outside the completed session interval is invalid.',
+  );
+
   const outsideBoundary: PresenceSession = {
     ...presence,
     evidence: {
@@ -312,6 +340,414 @@ export function runCanonicalDomainTests(): void {
       canQualifyForGpsVerifiedPresence(noGpsEvidence, VERIFIED_PARK).status ===
         'ineligible',
     'Missing GPS evidence must be explicitly ineligible.',
+  );
+
+  const walkingObservationId = id(
+    parseCanonicalObservationId('observation-walking-1'),
+    'Walking observation id',
+  );
+  const walkingObservation: LocationObservation = {
+    id: walkingObservationId,
+    userId: TEST_USER_ID,
+    sessionId: walking.id,
+    kind: 'walking',
+    observedAt: 6500,
+    location: { latitude: 0, longitude: 0 },
+    evidenceStatus: 'unverified',
+    source: 'manual',
+    idempotencyKey: 'observation-walking-1',
+  };
+  assert(
+    validateLocationObservation(
+      walkingObservation,
+      [walking],
+      EXISTING_NODE_RECORDS,
+    ).valid,
+    'Node-less walking observations remain valid.',
+  );
+  assert(
+    validateLocationObservation(
+      { ...walkingObservation, userId: id(parseUserId('other-user'), 'Other user id') },
+      [walking],
+      TEST_NODES,
+    ).valid === false,
+    'Walking observations must bind to the session user.',
+  );
+  assert(
+    validateLocationObservation(
+      { ...walkingObservation, sessionId: id(parseActivitySessionId('other-session'), 'Other session id') },
+      [walking],
+      TEST_NODES,
+    ).valid === false,
+    'Walking observations must reference an existing session.',
+  );
+  assert(
+    validateLocationObservation(
+      { ...walkingObservation, observedAt: walking.startedAt - 1 },
+      [walking],
+      TEST_NODES,
+    ).valid === false,
+    'Observations before the session interval are invalid.',
+  );
+  assert(
+    validateLocationObservation(
+      { ...walkingObservation, observedAt: walking.startedAt + 1001 },
+      [walking],
+      TEST_NODES,
+    ).valid === false,
+    'Observations after a completed session are invalid.',
+  );
+
+  const presenceObservation: LocationObservation = {
+    id: id(
+      parseCanonicalObservationId('observation-presence-1'),
+      'Presence observation id',
+    ),
+    userId: TEST_USER_ID,
+    sessionId: PRESENCE_ID,
+    kind: 'presence',
+    nodeId: PARK_ID,
+    observedAt: 4000,
+    location: { latitude: 0, longitude: 0 },
+    evidenceStatus: 'verified',
+    source: 'gps',
+    idempotencyKey: 'observation-presence-1',
+  };
+  assert(
+    validateLocationObservation(
+      presenceObservation,
+      [presence],
+      TEST_NODES,
+    ).valid,
+    'Verified presence observations bind correctly to session, user, and node.',
+  );
+  assert(
+    !validateLocationObservation(
+      { ...presenceObservation, sessionId: PARTICIPATION_ID },
+      [presence, participation],
+      TEST_NODES,
+    ).valid,
+    'A presence observation cannot be reassigned to a participation session.',
+  );
+  assert(
+    !validateLocationObservation(
+      { ...presenceObservation, nodeId: COURT_ID },
+      [presence],
+      TEST_NODES,
+    ).valid,
+    'GPS observation nodeId cannot be contaminated by an unrelated node.',
+  );
+  assert(
+    !validateLocationObservation(
+      {
+        ...presenceObservation,
+        evidenceStatus: 'verified',
+        location: { latitude: 1, longitude: 1 },
+      },
+      [presence],
+      TEST_NODES,
+    ).valid,
+    'Verified presence cannot use a location outside node geography.',
+  );
+
+  const simulatedPresence: LocationObservation = {
+    ...presenceObservation,
+    id: id(
+      parseCanonicalObservationId('observation-presence-simulated'),
+      'Simulated presence observation id',
+    ),
+    evidenceStatus: 'simulated',
+    source: 'simulation',
+    idempotencyKey: 'observation-presence-simulated',
+  };
+  assert(
+    validateLocationObservation(
+      simulatedPresence,
+      [presence],
+      TEST_NODES,
+    ).valid,
+    'Simulated observations are represented distinctly and can remain recorded.',
+  );
+
+  const participationObservation: LocationObservation = {
+    id: id(
+      parseCanonicalObservationId('observation-participation-1'),
+      'Participation observation id',
+    ),
+    userId: TEST_USER_ID,
+    sessionId: PARTICIPATION_ID,
+    kind: 'participation',
+    nodeId: COURT_ID,
+    observedAt: 1500,
+    evidenceStatus: 'verified',
+    source: 'organized',
+    idempotencyKey: 'observation-participation-1',
+  };
+  assert(
+    validateLocationObservation(
+      participationObservation,
+      [participation],
+      TEST_NODES,
+    ).valid,
+    'Participation evidence is distinct from geographic presence.',
+  );
+  const participationEvent: CanonicalEventRecord = {
+    id: id(
+      parseCanonicalEventId('event-participation-1'),
+      'Participation canonical event id',
+    ),
+    userId: TEST_USER_ID,
+    sessionId: PARTICIPATION_ID,
+    kind: 'participation_observation',
+    nodeId: COURT_ID,
+    occurredAt: 2000,
+    evidenceStatus: 'verified',
+    observationIds: [participationObservation.id],
+    idempotencyKey: 'event-participation-1',
+  };
+  assert(
+    validateCanonicalEvent(
+      participationEvent,
+      [participationObservation],
+      [participation],
+      TEST_NODES,
+    ).valid,
+    'Participation events preserve session identity and explicit evidence source.',
+  );
+  assert(
+    participationObservation.kind !== presenceObservation.kind &&
+      presenceObservation.kind !== walkingObservation.kind &&
+      walkingObservation.kind !== participationObservation.kind,
+    'Walking, presence, and participation observations remain separate kinds.',
+  );
+
+  const simulatedParticipationObservation: LocationObservation = {
+    ...participationObservation,
+    id: id(
+      parseCanonicalObservationId('observation-participation-simulated'),
+      'Simulated participation observation id',
+    ),
+    evidenceStatus: 'simulated',
+    source: 'simulation',
+    idempotencyKey: 'observation-participation-simulated',
+  };
+  const simulatedParticipationEvent: CanonicalEventRecord = {
+    ...participationEvent,
+    id: id(
+      parseCanonicalEventId('event-participation-simulated'),
+      'Simulated participation event id',
+    ),
+    evidenceStatus: 'simulated',
+    observationIds: [simulatedParticipationObservation.id],
+    idempotencyKey: 'event-participation-simulated',
+  };
+  const participationAuthority = deriveAcceptedAuthoritativeEvents(
+    [simulatedParticipationEvent],
+    [simulatedParticipationObservation],
+    [participation],
+    TEST_NODES,
+  );
+  assert(
+    participationAuthority.valid &&
+      participationAuthority.value.length === 0,
+    'Simulated participation evidence never becomes authoritative.',
+  );
+
+  const presenceEvent: CanonicalEventRecord = {
+    id: id(
+      parseCanonicalEventId('event-presence-1'),
+      'Presence canonical event id',
+    ),
+    userId: TEST_USER_ID,
+    sessionId: PRESENCE_ID,
+    kind: 'presence_observation',
+    nodeId: PARK_ID,
+    occurredAt: 5000,
+    evidenceStatus: 'verified',
+    observationIds: [presenceObservation.id],
+    idempotencyKey: 'event-presence-1',
+  };
+  assert(
+    validateCanonicalEvent(
+      presenceEvent,
+      [presenceObservation],
+      [presence],
+      TEST_NODES,
+    ).valid,
+    'Canonical presence events validate with complete observation evidence.',
+  );
+  assert(
+    !validateCanonicalEvent(
+      { ...presenceEvent, occurredAt: 3999 },
+      [presenceObservation],
+      [presence],
+      TEST_NODES,
+    ).valid,
+    'Canonical events cannot precede their observation evidence.',
+  );
+  assert(
+    !validateCanonicalEvent(
+      { ...presenceEvent, sessionId: PARTICIPATION_ID },
+      [presenceObservation],
+      [presence, participation],
+      TEST_NODES,
+    ).valid,
+    'Canonical events cannot reuse observations from another session.',
+  );
+
+  const simulatedPresenceEvent: CanonicalEventRecord = {
+    ...presenceEvent,
+    id: id(
+      parseCanonicalEventId('event-presence-simulated'),
+      'Simulated presence event id',
+    ),
+    idempotencyKey: 'event-presence-simulated',
+    evidenceStatus: 'simulated',
+    observationIds: [simulatedPresence.id],
+  };
+  assert(
+    validateCanonicalEvent(
+      simulatedPresenceEvent,
+      [simulatedPresence],
+      [presence],
+      TEST_NODES,
+    ).valid,
+    'Simulated presence remains a valid recorded event.',
+  );
+
+  const observationReplay = recordLocationObservation(
+    [presenceObservation],
+    presenceObservation,
+  );
+  equal(
+    observationReplay.status,
+    'duplicate',
+    'Duplicate observation submission is replay-safe.',
+  );
+  assert(
+    recordLocationObservation(
+      [presenceObservation],
+      { ...presenceObservation, location: { latitude: 1, longitude: 1 } },
+    ).status === 'conflict',
+    'Conflicting observation identities are rejected.',
+  );
+
+  const eventReplay = recordCanonicalEvent([presenceEvent], presenceEvent);
+  equal(
+    eventReplay.status,
+    'duplicate',
+    'Duplicate canonical event submission is replay-safe.',
+  );
+  assert(
+    recordCanonicalEvent(
+      [presenceEvent],
+      { ...presenceEvent, occurredAt: presenceEvent.occurredAt + 1 },
+    ).status === 'conflict',
+    'Conflicting canonical event identities are rejected.',
+  );
+
+  const orderedEvents = sortCanonicalEvents([
+    { ...presenceEvent, occurredAt: 5000 },
+    {
+      ...presenceEvent,
+      id: id(parseCanonicalEventId('event-presence-earlier'), 'Earlier event id'),
+      idempotencyKey: 'event-presence-earlier',
+      occurredAt: 4000,
+    },
+  ]);
+  equal(
+    orderedEvents[0].occurredAt,
+    4000,
+    'Canonical event ordering is deterministic by timestamp.',
+  );
+  assert(
+    sortLocationObservations([
+      { ...presenceObservation, observedAt: 4500 },
+      { ...presenceObservation, observedAt: 4000 },
+    ])[0].observedAt === 4000,
+    'Location observation ordering is deterministic by timestamp.',
+  );
+
+  const authoritative = deriveAcceptedAuthoritativeEvents(
+    [presenceEvent, simulatedPresenceEvent],
+    [presenceObservation, simulatedPresence],
+    [presence],
+    TEST_NODES,
+  );
+  assert(authoritative.valid, 'Authoritative event derivation should validate.');
+  equal(
+    authoritative.value.length,
+    1,
+    'Only verified, non-simulated presence evidence becomes authoritative.',
+  );
+
+  const simulatedWalkingObservation: LocationObservation = {
+    ...walkingObservation,
+    id: id(
+      parseCanonicalObservationId('observation-walking-simulated'),
+      'Simulated walking observation id',
+    ),
+    evidenceStatus: 'simulated',
+    source: 'simulation',
+    idempotencyKey: 'observation-walking-simulated',
+  };
+  const simulatedWalkingEvent: CanonicalEventRecord = {
+    id: id(
+      parseCanonicalEventId('event-walking-simulated'),
+      'Simulated walking event id',
+    ),
+    userId: TEST_USER_ID,
+    sessionId: walking.id,
+    kind: 'walking_observation',
+    occurredAt: 6500,
+    evidenceStatus: 'simulated',
+    observationIds: [simulatedWalkingObservation.id],
+    idempotencyKey: 'event-walking-simulated',
+  };
+  const simulatedWalkingAuthority = deriveAcceptedAuthoritativeEvents(
+    [simulatedWalkingEvent],
+    [simulatedWalkingObservation],
+    [walking],
+    TEST_NODES,
+  );
+  assert(
+    simulatedWalkingAuthority.valid &&
+      simulatedWalkingAuthority.value.length === 0,
+    'Simulated walking observations never become accepted authoritative evidence.',
+  );
+
+  const verifiedLookingSimulatedWalkingEvent: CanonicalEventRecord = {
+    ...simulatedWalkingEvent,
+    id: id(
+      parseCanonicalEventId('event-walking-self-claimed-verified'),
+      'Self-claimed walking event id',
+    ),
+    idempotencyKey: 'event-walking-self-claimed-verified',
+    evidenceStatus: 'verified',
+    observationIds: [
+      id(
+        parseCanonicalObservationId('observation-walking-real-looking'),
+        'Real-looking walking observation id',
+      ),
+    ],
+  };
+  const verifiedLookingSimulatedWalkingObservation: LocationObservation = {
+    ...walkingObservation,
+    id: verifiedLookingSimulatedWalkingEvent.observationIds[0],
+    evidenceStatus: 'verified',
+    source: 'gps-device',
+    idempotencyKey: 'observation-walking-real-looking',
+  };
+  const selfClaimedAuthority = deriveAcceptedAuthoritativeEvents(
+    [verifiedLookingSimulatedWalkingEvent],
+    [verifiedLookingSimulatedWalkingObservation],
+    [walking],
+    TEST_NODES,
+  );
+  assert(
+    selfClaimedAuthority.valid &&
+      selfClaimedAuthority.value.length === 0,
+    'Verified-looking evidence cannot authorize a simulated walking session.',
   );
 
   const walkingWithoutNode = makeCompletedWalking('walking-no-node', 0);
@@ -407,6 +843,14 @@ export function runCanonicalDomainTests(): void {
   assert(
     validateXPEntry(entries[2], sessions, TEST_NODES).valid,
     'Simulated walking can be represented under a simulation economy.',
+  );
+  assert(
+    !validateXPEntry(
+      { ...entries[0], awardedAt: 1999 },
+      sessions,
+      TEST_NODES,
+    ).valid,
+    'XP awards cannot precede their source session completion.',
   );
 
   const replay = {
