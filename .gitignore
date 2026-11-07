@@ -42,3 +42,6 @@ yarn-error.*
 .claude/
 AGENTS.md
 CLAUDE.md
+
+# Stage 7.5 development database
+.data/
