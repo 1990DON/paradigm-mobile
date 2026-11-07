@@ -221,6 +221,15 @@ function sameXPEntry(first: XPEntry, second: XPEntry): boolean {
     first.category === second.category &&
     first.amount === second.amount &&
     first.awardedAt === second.awardedAt &&
+    first.source.evidence?.eventId === second.source.evidence?.eventId &&
+    (
+      first.source.evidence?.observationIds.length ===
+      second.source.evidence?.observationIds.length &&
+      (first.source.evidence?.observationIds.every(
+        (observationId, index) =>
+          observationId === second.source.evidence?.observationIds[index],
+      ) ?? true)
+    ) &&
     sameEconomy
   );
 }
@@ -418,6 +427,8 @@ export class SessionProcessor {
         input,
         tx.snapshot.sessions.map((item) => item.activity),
         tx.snapshot.nodes,
+        tx.snapshot.events,
+        tx.snapshot.observations,
       );
       if (!validation.valid) return { accepted: false, errors: validation.errors };
       const candidate = validation.value;

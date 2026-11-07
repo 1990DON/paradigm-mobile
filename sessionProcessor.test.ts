@@ -332,15 +332,42 @@ export function runSessionProcessorTests(): void {
       walking: { distanceMeters: 1000, distanceSource: 'measured' },
     });
     processor.startSession(sessionId('session-xp'), userId);
+    processor.acceptObservation({
+      id: observationId('observation-xp'),
+      idempotencyKey: 'observation-xp',
+      userId,
+      sessionId: sessionId('session-xp'),
+      kind: 'walking',
+      observedAt: 1100,
+      location: { latitude: 0, longitude: 0 },
+      evidenceStatus: 'verified',
+      source: 'gps',
+    });
+    processor.acceptEvent({
+      id: eventId('event-xp'),
+      idempotencyKey: 'event-xp',
+      userId,
+      sessionId: sessionId('session-xp'),
+      kind: 'walking_observation',
+      occurredAt: 1100,
+      evidenceStatus: 'verified',
+      observationIds: [observationId('observation-xp')],
+    });
     processor.completeSession(sessionId('session-xp'), userId, 2000);
     const entry = {
       id: id(parseXPEntryId('xp-entry-1'), 'XP entry id'),
       idempotencyKey: 'xp-award-1',
       userId,
-      source: { activitySessionId: sessionId('session-xp') },
+      source: {
+        activitySessionId: sessionId('session-xp'),
+        evidence: {
+          eventId: eventId('event-xp'),
+          observationIds: [observationId('observation-xp')],
+        },
+      },
       category: 'walking' as const,
       amount: 5,
-      economyVersion: { scope: 'live', version: 'stage6-live-v1' } as EconomyVersion,
+      economyVersion: { scope: 'live', version: 'stage6-baseline-walking-v1' } as EconomyVersion,
       awardedAt: 2000,
     };
     assert(processor.recordAward(entry).accepted, 'Legitimate XP award must be accepted.');

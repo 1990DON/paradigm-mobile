@@ -188,6 +188,10 @@ export type XPEntry = {
   userId: UserId;
   source: {
     activitySessionId: ActivitySessionId;
+    evidence?: {
+      eventId: CanonicalEventId;
+      observationIds: readonly CanonicalObservationId[];
+    };
   };
   category: ActivityCategory;
   amount: number;
@@ -1298,16 +1302,164 @@ export function validateXPEntry(
   value: unknown,
   sessions: readonly ActivitySession[],
   nodes: readonly NodeRecord[],
+  events: readonly CanonicalEventRecord[] = [],
+  observations: readonly LocationObservation[] = [],
 ): ValidationResult<XPEntry> {
   if (!isRecord(value)) {
     return { valid: false, errors: ['XP entry must be an object.'] };
   }
 
   const errors: string[] = [];
+  const xpSource = isRecord(value.source) ? value.source : null;
+  const xpEvidence =
+    xpSource && isRecord(xpSource.evidence) ? xpSource.evidence : null;
   if (!isNonEmptyString(value.id)) errors.push('XP entry id is required.');
   if (!isNonEmptyString(value.userId)) errors.push('XP entry userId is required.');
   if (!isRecord(value.source) || !isNonEmptyString(value.source.activitySessionId)) {
     errors.push('XP entry must reference a source activity session.');
+  }
+  if (
+    isRecord(value.source) &&
+    value.source.evidence !== undefined
+  ) {
+    if (!isRecord(value.source.evidence)) {
+      errors.push('XP evidence relationship must be an object.');
+    } else {
+      if (!isNonEmptyString(value.source.evidence.eventId)) {
+        errors.push('XP evidence relationship requires an event id.');
+      }
+      if (
+        !Array.isArray(value.source.evidence.observationIds) ||
+        value.source.evidence.observationIds.length === 0 ||
+        !value.source.evidence.observationIds.every((observationId) =>
+          isNonEmptyString(observationId)) ||
+        new Set(value.source.evidence.observationIds).size !==
+          value.source.evidence.observationIds.length
+      ) {
+        errors.push('XP evidence relationship requires unique observation ids.');
+      }
+    }
+  }
+  if (
+    value.category === 'walking' &&
+    isRecord(value.economyVersion) &&
+    value.economyVersion.scope === 'live' &&
+    (
+      !isNonEmptyString(value.economyVersion.version) ||
+      value.economyVersion.version !== 'stage6-baseline-walking-v1'
+    )
+  ) {
+    errors.push('Live walking XP requires the Stage 6 baseline walking economy version.');
+  }
+  if (
+    value.category === 'walking' &&
+    isRecord(value.economyVersion) &&
+    value.economyVersion.scope === 'live' &&
+    (
+      !isRecord(value.source) ||
+      !isRecord(value.source.evidence)
+    )
+  ) {
+    errors.push('Live walking XP requires canonical event and observation evidence.');
+  }
+  if (
+    xpSource &&
+    xpEvidence &&
+    isNonEmptyString(xpEvidence.eventId) &&
+    Array.isArray(xpEvidence.observationIds)
+  ) {
+    const event = events.find(
+      (candidate) => candidate.id === xpEvidence.eventId,
+    );
+    if (!event) {
+      errors.push('XP evidence event does not exist in canonical history.');
+    } else {
+      const sourceSession = sessions.find(
+        (session) => session.id === xpSource.activitySessionId,
+      );
+      if (
+        value.category === 'walking' &&
+        (
+          !sourceSession ||
+          sourceSession.activityType !== 'walking' ||
+          sourceSession.status !== 'completed' ||
+          sourceSession.evidence.distanceSource !== 'measured' ||
+          !Number.isFinite(sourceSession.evidence.distanceMeters) ||
+          sourceSession.evidence.distanceMeters <= 0
+        )
+      ) {
+        errors.push('Live walking XP requires completed measured walking evidence.');
+      }
+      if (
+        event.userId !== value.userId ||
+        event.sessionId !== xpSource.activitySessionId ||
+        event.evidenceStatus !== 'verified'
+      ) {
+        errors.push('XP evidence event is not verified or is bound to another user/session.');
+      } else if (
+        value.category === 'walking' &&
+        event.kind !== 'walking_observation'
+      ) {
+        errors.push('Walking XP evidence must reference a walking canonical event.');
+      } else if (
+        value.category === 'presence' &&
+        event.kind !== 'presence_observation'
+      ) {
+        errors.push('Presence XP evidence must reference a presence canonical event.');
+      } else if (
+        value.category === 'participation' &&
+        event.kind !== 'participation_observation'
+      ) {
+        errors.push('Participation XP evidence must reference a participation canonical event.');
+      }
+      const evidenceObservationIds =
+        xpEvidence.observationIds as readonly CanonicalObservationId[];
+      if (
+        event.observationIds.length !== evidenceObservationIds.length ||
+        event.observationIds.some(
+          (observationId, index) =>
+            observationId !== evidenceObservationIds[index],
+        )
+      ) {
+        errors.push('XP evidence must match the complete canonical event observation set.');
+      }
+      for (const observationId of evidenceObservationIds) {
+        if (!isNonEmptyString(observationId)) continue;
+        const observation = observations.find(
+          (candidate) => candidate.id === observationId,
+        );
+        if (!observation) {
+          errors.push(`XP evidence observation ${observationId} does not exist.`);
+        } else if (
+          observation.userId !== value.userId ||
+          observation.sessionId !== xpSource.activitySessionId ||
+          observation.evidenceStatus !== 'verified' ||
+          observation.source === 'simulation' ||
+          observation.source === 'simulated' ||
+          !event.observationIds.includes(observationId as CanonicalObservationId) ||
+          (value.category === 'walking' && observation.kind !== 'walking') ||
+          (value.category === 'presence' && observation.kind !== 'presence') ||
+          (value.category === 'participation' && observation.kind !== 'participation')
+        ) {
+          errors.push('XP evidence observation is not verified, related, or bound to the award.');
+        }
+      }
+      if (value.category === 'walking') {
+        const sessionWalkingObservations = observations.filter(
+          (observation) =>
+            observation.sessionId === xpSource.activitySessionId &&
+            observation.kind === 'walking',
+        );
+        if (
+          sessionWalkingObservations.length !== evidenceObservationIds.length ||
+          sessionWalkingObservations.some((observation) =>
+            !evidenceObservationIds.includes(observation.id),
+          )
+        ) {
+          errors.push('Walking XP evidence must account for all session walking observations.');
+        }
+      }
+    }
   }
   if (
     value.category !== 'walking' &&
@@ -1422,6 +1574,19 @@ function sameAwardPayload(first: XPEntry, second: XPEntry): boolean {
     first.source.activitySessionId === second.source.activitySessionId &&
     first.category === second.category &&
     first.amount === second.amount &&
+    first.source.evidence?.eventId === second.source.evidence?.eventId &&
+    (
+      first.source.evidence === undefined &&
+      second.source.evidence === undefined ||
+      first.source.evidence !== undefined &&
+      second.source.evidence !== undefined &&
+      first.source.evidence.observationIds.length ===
+        second.source.evidence.observationIds.length &&
+      first.source.evidence.observationIds.every(
+        (observationId, index) =>
+          observationId === second.source.evidence?.observationIds[index],
+      )
+    ) &&
     sameEconomyVersion(first.economyVersion, second.economyVersion)
   );
 }
@@ -1474,6 +1639,8 @@ export function deriveXPProjections(
   entries: readonly XPEntry[],
   sessions: readonly ActivitySession[],
   nodes: readonly NodeRecord[],
+  events: readonly CanonicalEventRecord[] = [],
+  observations: readonly LocationObservation[] = [],
 ): ValidationResult<XPProjections> {
   let totalXp = 0;
   const byCategory: Record<ActivityCategory, number> = {
@@ -1486,7 +1653,7 @@ export function deriveXPProjections(
 
   for (const entry of entries) {
     if (entry.userId !== userId) continue;
-    const validation = validateXPEntry(entry, sessions, nodes);
+    const validation = validateXPEntry(entry, sessions, nodes, events, observations);
     if (!validation.valid) {
       return {
         valid: false,
@@ -1585,12 +1752,14 @@ export function deriveCompletedSessionProjection(
   entries: readonly XPEntry[],
   nodes: readonly NodeRecord[],
   userId?: UserId,
+  events: readonly CanonicalEventRecord[] = [],
+  observations: readonly LocationObservation[] = [],
 ): ValidationResult<CompletedSession[]> {
   const completedAwards = new Map<ActivitySessionId, number>();
   const acceptedEntries: XPEntry[] = [];
   for (const entry of entries) {
     if (userId !== undefined && entry.userId !== userId) continue;
-    const validation = validateXPEntry(entry, sessions, nodes);
+    const validation = validateXPEntry(entry, sessions, nodes, events, observations);
     if (!validation.valid) {
       return {
         valid: false,
